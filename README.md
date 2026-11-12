@@ -121,6 +121,37 @@ Use a higher CRF value and a slower preset to achieve greater compression.
 - FFmpeg with `libx265` support for CPU encoding.
 - FFmpeg with NVIDIA NVENC HEVC support and compatible NVIDIA drivers for GPU encoding.
 
+### Installing FFmpeg with WinGet
+
+FFmpeg can be installed using Windows Package Manager (WinGet).
+
+Run the following command in PowerShell:
+
+```powershell
+winget install --id Gyan.FFmpeg.Shared -e
+```
+
+After installation, restart PowerShell or open a new terminal window to refresh the environment.
+
+Verify the installation:
+
+```powershell
+ffmpeg -version
+```
+
+Check whether the required video encoders are available:
+
+```powershell
+ffmpeg -encoders | Select-String "libx265|hevc_nvenc"
+```
+
+Expected encoders:
+
+- `libx265` — CPU-based HEVC encoding.
+- `hevc_nvenc` — NVIDIA GPU-based HEVC encoding.
+
+**Note:** The availability of `hevc_nvenc` depends on the installed FFmpeg build and compatible NVIDIA drivers. Installing FFmpeg does not guarantee that NVENC is supported by your GPU or driver configuration.
+
 ## Notes
 
 - CPU encoding uses the `libx265` encoder.
