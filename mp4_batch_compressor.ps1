@@ -22,6 +22,12 @@ param(
     [ValidateSet("p1", "p2", "p3", "p4", "p5", "p6", "p7")]
     [string]$NvencPreset = "p7",
 
+    # Optional NAS/network keep-alive. Example: -KeepAliveHost "192.168.1.50"
+    [string]$KeepAliveHost,
+
+    [ValidateRange(5, 3600)]
+    [int]$KeepAliveIntervalSeconds = 30,
+
     [switch]$Help
 )
 
@@ -59,6 +65,10 @@ ENCODING:
   -Preset slow       CPU preset
   -NvencPreset p7    GPU preset (p1 fastest, p7 slowest)
 
+NETWORK / NAS:
+  -KeepAliveHost     Optional override. If omitted, host is extracted from UNC path.
+  -KeepAliveIntervalSeconds  Ping interval in seconds (default: 30)
+
 OTHER:
   -Help              Display this help
 
@@ -78,6 +88,15 @@ EXAMPLES:
 
   GPU, replace originals:
   .\mp4_batch_compressor.ps1 -Mode Replace -Encoder GPU -PathsFile ".\folders.txt"
+
+  NAS keep-alive (host is automatically extracted from UNC path):
+  .\mp4_batch_compressor.ps1 -Mode Suffix -Encoder GPU -RootPath "\\NAS326\Videos"
+
+  Explicit ping target override:
+  .\mp4_batch_compressor.ps1 -Mode Suffix -RootPath "\\NAS326\Videos" -KeepAliveHost "192.168.1.50"
+
+  Custom ping interval (60 seconds):
+  .\mp4_batch_compressor.ps1 -Mode Suffix -RootPath "\\NAS326\Videos" -KeepAliveHost "192.168.1.50" -KeepAliveIntervalSeconds 60
 
   CPU, higher compression:
   .\mp4_batch_compressor.ps1 -Mode Replace -Encoder CPU -Crf 22 -Preset slower
@@ -139,6 +158,68 @@ function Get-Percent {
     return [math]::Round(
         (1 - ($Final / $Original)) * 100, 2
     )
+}
+
+function Get-KeepAliveHostFromPath {
+    param([string]$Path)
+
+    # UNC path format: \\server\share\folder
+    if ($Path -match '^\\\\([^\\]+)\\') {
+        return $Matches[1]
+    }
+
+    return $null
+}
+
+function Invoke-FFmpegWithKeepAlive {
+    param(
+        [string]$FFmpegPath,
+        [string[]]$Arguments,
+        [string]$TargetHost,
+        [int]$IntervalSeconds
+    )
+
+    $KeepAliveJob = $null
+
+    if (-not [string]::IsNullOrWhiteSpace($TargetHost)) {
+        Write-Host "    NAS keep-alive: pinging $TargetHost every $IntervalSeconds seconds" -ForegroundColor DarkCyan
+
+        # Run the ping loop in a background PowerShell job while FFmpeg runs.
+        # ICMP failures are non-fatal and do not interrupt encoding.
+        $KeepAliveJob = Start-Job -ArgumentList $TargetHost, $IntervalSeconds -ScriptBlock {
+            param($HostToPing, $DelaySeconds)
+
+            $Pinger = New-Object System.Net.NetworkInformation.Ping
+            try {
+                while ($true) {
+                    try {
+                        $null = $Pinger.Send($HostToPing, 1500)
+                    }
+                    catch {
+                        # A missed ICMP reply must not stop video encoding.
+                    }
+                    Start-Sleep -Seconds $DelaySeconds
+                }
+            }
+            finally {
+                $Pinger.Dispose()
+            }
+        }
+
+        Start-Sleep -Milliseconds 300
+    }
+
+    try {
+        & $FFmpegPath @Arguments
+        $ExitCode = $LASTEXITCODE
+        return [int]$ExitCode
+    }
+    finally {
+        if ($KeepAliveJob) {
+            Stop-Job -Job $KeepAliveJob -ErrorAction SilentlyContinue
+            Remove-Job -Job $KeepAliveJob -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Save-Marker {
@@ -431,6 +512,12 @@ foreach ($Root in $ValidFolders) {
     Write-Host "PROCESSING: $Root" -ForegroundColor Cyan
     Write-Host "Encoder: $Encoder | Preset: $ActivePreset | Quality: $Crf"
     Write-Host "Mode: $Mode"
+    if (-not [string]::IsNullOrWhiteSpace($KeepAliveHost)) {
+        Write-Host "NAS keep-alive override: $KeepAliveHost (every $KeepAliveIntervalSeconds sec)"
+    }
+    else {
+        Write-Host "NAS keep-alive: automatic for UNC paths (every $KeepAliveIntervalSeconds sec)"
+    }
     Write-Host "============================================================" -ForegroundColor Cyan
 
     $MarkerFile = Join-Path $Root ".mp4_compressor_processed.json"
@@ -556,10 +643,24 @@ foreach ($Root in $ValidFolders) {
                     $TempFile
                 )
 
-                & $FFmpeg.Source @FFArgs
+                # Prefer an explicitly supplied host. Otherwise, for UNC paths,
+                # extract the server name (for example, \\NAS326\Share -> NAS326).
+                # Windows resolves this hostname using its normal name-resolution
+                # mechanisms, just like: ping NAS326
+                $FileKeepAliveHost = $KeepAliveHost
 
-                if ($LASTEXITCODE -ne 0) {
-                    throw "FFmpeg exit code: $LASTEXITCODE"
+                if ([string]::IsNullOrWhiteSpace($FileKeepAliveHost)) {
+                    $FileKeepAliveHost = Get-KeepAliveHostFromPath -Path $InputFile
+                }
+
+                $FFmpegExitCode = Invoke-FFmpegWithKeepAlive `
+                    -FFmpegPath $FFmpeg.Source `
+                    -Arguments $FFArgs `
+                    -TargetHost $FileKeepAliveHost `
+                    -IntervalSeconds $KeepAliveIntervalSeconds
+
+                if ($FFmpegExitCode -ne 0) {
+                    throw "FFmpeg exit code: $FFmpegExitCode"
                 }
 
                 if (-not (Test-Path -LiteralPath $TempFile)) {
