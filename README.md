@@ -4,7 +4,7 @@ A PowerShell script for batch-compressing MP4 video files using CPU-based or NVI
 
 ## Overview
 
-MP4 Batch Compressor automates video compression across multiple directories. It supports recursive file discovery, CPU and GPU encoding, automatic resume, detailed reporting, and safe replacement of original files.
+MP4 Batch Compressor automates video compression across multiple directories. It supports recursive file discovery, CPU and GPU encoding, automatic resume, detailed reporting, safe replacement of original files, and network keep-alive for NAS storage.
 
 | Feature | Description |
 |---|---|
@@ -15,6 +15,7 @@ MP4 Batch Compressor automates video compression across multiple directories. It
 | Resume | Automatic resume using JSON markers |
 | Reports | Per-folder reports and global summary |
 | Audio | Copy audio streams without re-encoding |
+| NAS Keep-Alive | Periodic ping to keep network storage connections active |
 
 ## Usage
 
@@ -33,8 +34,8 @@ MP4 Batch Compressor automates video compression across multiple directories. It
 
 | Parameter | Description |
 |---|---|
-| `-RootPath` | One or more directories to process (comma-separated). |
-| `-PathsFile` | Path to a text file containing one directory per line. |
+| `-RootPath` | One or more directories to process (comma-separated). Supports local paths and UNC network paths. |
+| `-PathsFile` | Path to a text file containing one directory per line. Supports local paths and UNC network paths. |
 
 ## Encoding Parameters
 
@@ -44,6 +45,52 @@ MP4 Batch Compressor automates video compression across multiple directories. It
 | `-Crf` | `20` | Quality setting (CRF for CPU encoding, CQ for GPU encoding). |
 | `-Preset` | `slow` | CPU encoding preset. |
 | `-NvencPreset` | `p7` | NVIDIA NVENC preset (`p1` = fastest, `p7` = slowest). |
+
+## NAS / Network Keep-Alive Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `-KeepAliveHost` | Automatic | Optional hostname or IP address to ping. If omitted, the hostname is extracted automatically from the UNC path. |
+| `-KeepAliveIntervalSeconds` | `30` | Interval between ping requests, in seconds. Valid range: 5–3600. |
+
+### How NAS Keep-Alive Works
+
+When processing files located on a network share, the script can periodically send ICMP ping requests to the NAS while FFmpeg is encoding a file.
+
+If `-KeepAliveHost` is not specified, the script automatically extracts the server name from the UNC path.
+
+For example, given this input path:
+
+```text
+\\NAS326\Videos
+```
+
+The script extracts:
+
+```text
+NAS326
+```
+
+Windows resolves the hostname using its normal name-resolution mechanisms, just as it does when executing:
+
+```powershell
+ping NAS326
+```
+
+This means there is no need to manually configure the NAS IP address.
+
+Keep-alive behavior:
+
+- A background PowerShell job sends periodic ICMP ping requests while FFmpeg is running.
+- The default ping interval is 30 seconds.
+- The first ping is sent shortly after the background job starts.
+- The background job is stopped when FFmpeg finishes processing the current file.
+- If multiple UNC paths point to different NAS devices, the hostname is detected separately for each file.
+- An explicitly specified `-KeepAliveHost` overrides automatic hostname detection.
+- Local disk paths do not require network keep-alive.
+- Failed ping responses do not interrupt video encoding.
+
+**Note:** ICMP ping helps maintain network activity but does not guarantee that an SMB session will remain open if the NAS or network equipment independently terminates idle connections.
 
 ## Other Parameters
 
@@ -101,6 +148,65 @@ Use a higher CRF value and a slower preset to achieve greater compression.
 .\mp4_batch_compressor.ps1 -Mode Replace -Encoder CPU -Crf 22 -Preset slower
 ```
 
+### 7. NAS Processing — Automatic Keep-Alive
+
+Process videos directly from a NAS network share. The NAS hostname is automatically extracted from the UNC path.
+
+```powershell
+.\mp4_batch_compressor.ps1 `
+    -Mode Suffix `
+    -Encoder GPU `
+    -RootPath "\\NAS326\Videos"
+```
+
+The script automatically detects `NAS326` and sends periodic ping requests while FFmpeg is encoding.
+
+### 8. NAS Processing — Custom Keep-Alive Interval
+
+Use a 15-second ping interval.
+
+```powershell
+.\mp4_batch_compressor.ps1 `
+    -Mode Suffix `
+    -Encoder GPU `
+    -RootPath "\\NAS326\Videos" `
+    -KeepAliveIntervalSeconds 15
+```
+
+### 9. NAS Processing — Explicit Keep-Alive Host
+
+Manually specify the hostname or IP address if automatic detection is not suitable.
+
+```powershell
+.\mp4_batch_compressor.ps1 `
+    -Mode Suffix `
+    -Encoder GPU `
+    -RootPath "\\NAS326\Videos" `
+    -KeepAliveHost "192.168.10.125"
+```
+
+### 10. NAS Processing — Paths from a File
+
+Keep-alive works with UNC paths loaded from a paths file as well.
+
+Example `folders.txt`:
+
+```text
+\\NAS326\Videos
+\\NAS326\Movies
+E:\LocalVideos
+```
+
+Run:
+
+```powershell
+.\mp4_batch_compressor.ps1 `
+    -Mode Suffix `
+    -Encoder GPU `
+    -PathsFile ".\folders.txt" `
+    -KeepAliveIntervalSeconds 30
+```
+
 ## Features
 
 - **Recursive Discovery** — Automatically discovers MP4 files in all subdirectories.
@@ -113,6 +219,9 @@ Use a higher CRF value and a slower preset to achieve greater compression.
 - **Existing Output Detection** — In `Suffix` mode, files with existing compressed outputs are skipped.
 - **Source Properties Preservation** — Preserves the original video resolution and frame rate.
 - **Audio Stream Copy** — Copies audio streams without re-encoding, avoiding unnecessary quality loss and processing time.
+- **NAS Keep-Alive** — Periodically pings network storage during encoding to help prevent idle network connections from timing out.
+- **Automatic NAS Host Detection** — Extracts the NAS hostname from UNC paths without requiring manual IP configuration.
+- **Multiple NAS Support** — Detects the appropriate hostname separately for files from different network shares.
 
 ## Requirements
 
@@ -120,6 +229,8 @@ Use a higher CRF value and a slower preset to achieve greater compression.
 - PowerShell.
 - FFmpeg with `libx265` support for CPU encoding.
 - FFmpeg with NVIDIA NVENC HEVC support and compatible NVIDIA drivers for GPU encoding.
+- Network connectivity to the NAS when processing files from network shares.
+- ICMP ping requests must be permitted by the NAS and network configuration for NAS keep-alive to work.
 
 ### Installing FFmpeg with WinGet
 
@@ -159,6 +270,10 @@ Expected encoders:
 - The `-Crf` parameter controls CPU quality through CRF and GPU quality through CQ.
 - The `Replace` mode should be used with care. Always ensure that important source files are backed up.
 - Audio streams are copied directly from the source files without re-encoding.
+- NAS keep-alive is enabled automatically for UNC paths unless an explicit `-KeepAliveHost` is provided.
+- The default keep-alive interval is 30 seconds.
+- Keep-alive ping failures are non-fatal and do not stop FFmpeg processing.
+- ICMP ping does not guarantee that SMB sessions will remain active if the NAS or network equipment closes them independently.
 
 ## Project Structure
 
