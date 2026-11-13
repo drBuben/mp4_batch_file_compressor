@@ -228,6 +228,10 @@ function Save-Marker {
         [string]$Path
     )
 
+    # Defensive: .NET file APIs require a native path, not a PowerShell
+    # provider-qualified path such as Microsoft.PowerShell.Core\\FileSystem::...
+    $Path = $Path -replace '^[^:]+::', ''
+
     $TempPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
 
     try {
@@ -445,7 +449,7 @@ if ($PathsFile) {
         throw "Paths file not found: $PathsFile"
     }
 
-    $PathsFileFull = (Resolve-Path -LiteralPath $PathsFile).Path
+    $PathsFileFull = (Resolve-Path -LiteralPath $PathsFile).ProviderPath
     $PathsFileDir = Split-Path $PathsFileFull -Parent
 
     foreach ($Line in (Get-Content -LiteralPath $PathsFileFull)) {
@@ -478,7 +482,10 @@ $ValidFolders = [System.Collections.Generic.List[string]]::new()
 
 foreach ($Folder in $Folders) {
     if (Test-Path -LiteralPath $Folder -PathType Container) {
-        $Resolved = (Resolve-Path -LiteralPath $Folder).Path.TrimEnd('\')
+        # Use ProviderPath, not Path. Path can contain a PowerShell provider
+        # prefix (FileSystem::) which .NET file APIs cannot use as a native path.
+        $ResolvedInfo = Resolve-Path -LiteralPath $Folder
+        $Resolved = $ResolvedInfo.ProviderPath.TrimEnd('\')
 
         if (-not $ValidFolders.Contains($Resolved)) {
             $ValidFolders.Add($Resolved)
